@@ -1,3 +1,4 @@
+import 'dart:core';
 import 'dart:io';
 
 import 'package:analyzer/dart/element/element.dart';
@@ -9,6 +10,7 @@ import 'package:dcdg/src/type_namespace.dart';
 
 class PlantUmlBuilder implements DiagramBuilder {
   String? _currentClass;
+  List<String> _currentNamespace = [];
 
   final List<String> _lines = [
     '@startuml',
@@ -17,6 +19,8 @@ class PlantUmlBuilder implements DiagramBuilder {
   ];
 
   final Set<String> _relationships = {};
+
+  final _memberComments = <String, String>{};
 
   @override
   void addAggregation(FieldElement element) {
@@ -31,6 +35,11 @@ class PlantUmlBuilder implements DiagramBuilder {
     final name = element.name;
     final type = typeName(element);
     _lines.add('  $staticPrefix$visibilityPrefix$type $name');
+
+    final documentationComment = element.documentationComment;
+    if (documentationComment != null) {
+      _memberComments[name] = documentationComment;
+    }
   }
 
   @override
@@ -47,6 +56,11 @@ class PlantUmlBuilder implements DiagramBuilder {
     final name = element.name;
     final type = element.returnType.getDisplayString(withNullability: true);
     _lines.add('  $staticPrefix$visibilityPrefix$type $name()');
+
+    final documentationComment = element.documentationComment;
+    if (documentationComment != null) {
+      _memberComments[name] = documentationComment;
+    }
   }
 
   @override
@@ -65,6 +79,7 @@ class PlantUmlBuilder implements DiagramBuilder {
 
   @override
   void beginClass(ClassElement element) {
+    _packageDelta(element);
     _currentClass = namespacedTypeName(element);
     final decl = element.isAbstract ? 'abstract class' : 'class';
     _lines.add('$decl $_currentClass {');
@@ -73,14 +88,80 @@ class PlantUmlBuilder implements DiagramBuilder {
   @override
   void endClass(ClassElement element) {
     _lines.add('}');
-    if (_relationships.isNotEmpty) {
-      _lines.add('');
-      _lines.addAll(_relationships);
-    }
     _lines.add('');
 
+    final documentationComment = element.documentationComment;
+    if (documentationComment != null) {
+      _lines.add('note top');
+      _lines.add(_cleanComment(documentationComment));
+      _lines.add('end note');
+      _lines.add('');
+    }
+
+    _memberComments.entries.forEach((comment) {
+      _lines.add('note right of $_currentClass::${comment.key}');
+      _lines.add(_cleanComment(comment.value));
+      _lines.add('end note');
+      _lines.add('');
+    });
+
     _currentClass = null;
-    _relationships.clear();
+    _memberComments.clear();
+  }
+
+  String _cleanComment(String comment) {
+    return comment
+        .replaceAll('/// ', '')
+        .replaceAll('///', '')
+        .replaceAll('[', '')
+        .replaceAll(']', '');
+  }
+
+  final _namespacePattern = RegExp(r"\:\:");
+  void _packageDelta(Element element) {
+    final newNamespace = typeNamespace(element).split(_namespacePattern);
+    newNamespace.removeLast();
+
+    int diffBeginIndex = 0;
+    // Step 1: Skip identical elements
+    for (int i = 0; i < _currentNamespace.length; i++) {
+      if (i < newNamespace.length) {
+        if (_currentNamespace[i] == newNamespace[i]) {
+          // Elements are the same - difference begins after the identical elements
+          diffBeginIndex = i + 1;
+        } else {
+          break;
+        }
+      } else {
+        // New namespace is shorter than current one
+        break;
+      }
+    }
+
+    // Step 2: Close existing namespace levels that are different from previous ones
+    if (diffBeginIndex < _currentNamespace.length) {
+      for (int i = _currentNamespace.length - 1; i >= diffBeginIndex; i--) {
+        _lines.add("'Closing namespace ${_currentNamespace[i]}");
+        _lines.add('}');
+      }
+    }
+
+    // Step 3: Open new namespace levels
+    for (int i = diffBeginIndex; i < newNamespace.length; i++) {
+      final packageName = StringBuffer();
+      for (int i2 = 0; i2 <= i; i2++) {
+        if (i2 > 0) {
+          packageName.write('::');
+        }
+        packageName.write(newNamespace[i2]);
+      }
+
+      final colorHex =
+          (255 - 5 * i).toRadixString(16).toUpperCase().padLeft(2, '0');
+      _lines.add('namespace $packageName #$colorHex$colorHex$colorHex {');
+    }
+
+    _currentNamespace = newNamespace;
   }
 
   String namespacedTypeName(Element element) =>
@@ -96,7 +177,14 @@ class PlantUmlBuilder implements DiagramBuilder {
 
   @override
   void printContent(void Function(String content) printer) {
-    final content = ([..._lines, '', '@enduml']).join('\n');
+    final content = ([
+      ..._lines,
+      ...List<String>.filled(_currentNamespace.length, '}', growable: false),
+      '',
+      ..._relationships.toList(growable: false),
+      '',
+      '@enduml'
+    ]).join('\n');
     printer(content);
   }
 

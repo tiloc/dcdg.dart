@@ -4,6 +4,8 @@ import 'package:analyzer/dart/analysis/analysis_context_collection.dart';
 import 'package:analyzer/dart/analysis/results.dart';
 import 'package:analyzer/dart/element/element.dart';
 import 'package:dcdg/src/class_element_collector.dart';
+import 'package:glob/glob.dart';
+import 'package:glob/list_local_fs.dart';
 import 'package:path/path.dart' as path;
 
 /// Fetch and return the desired class elements from the package
@@ -24,30 +26,53 @@ Future<Iterable<ClassElement>> findClassElements({
         ),
       );
 
+  List<String> makePackageSubPaths(String part0) {
+    final dartFiles = Glob(part0, recursive: true);
+
+    final uniquePaths = Set<String>();
+
+    try {
+      dartFiles.listSync().forEach((e) => uniquePaths
+          .add(path.normalize(path.absolute(packagePath, e.dirname))));
+
+      return uniquePaths.toList(growable: false);
+    } catch (_) {
+      // Requested path doesn't exist
+      return [];
+    }
+  }
+
+  final includedPaths = [
+    ...makePackageSubPaths('lib/**.dart'),
+    ...makePackageSubPaths('bin/**.dart'),
+    ...makePackageSubPaths('web/**.dart'),
+  ];
+
   final contextCollection = AnalysisContextCollection(
-    includedPaths: [
-      makePackageSubPath('lib'),
-      makePackageSubPath('lib', 'src'),
-      makePackageSubPath('bin'),
-      makePackageSubPath('web'),
-    ],
+    includedPaths: includedPaths,
   );
 
   final dartFiles = Directory(makePackageSubPath(searchPath))
       .listSync(recursive: true)
       .where((file) => path.extension(file.path) == '.dart')
-      .where((file) => !exportedOnly || !file.path.contains('lib/src/'));
+      .where((file) => !exportedOnly || !file.path.contains('/src/'));
 
   final collector = ClassElementCollector(
     exportedOnly: exportedOnly,
   );
   for (final file in dartFiles) {
-    final filePath = path.normalize(path.absolute(file.path));
-    final context = contextCollection.contextFor(filePath);
+    try {
+      final filePath = path.normalize(path.absolute(file.path));
+      final context = contextCollection.contextFor(filePath);
 
-    final unitResult = await context.currentSession.getResolvedUnit(filePath);
-    if (unitResult is ResolvedUnitResult) {
-      unitResult.libraryElement.accept(collector);
+      final unitResult = await context.currentSession.getResolvedUnit(filePath);
+      if (unitResult is ResolvedUnitResult) {
+        unitResult.libraryElement.accept(collector);
+      }
+    } catch (e) {
+      // File analysis can fail, especially in irrelevant l10n files.
+      stderr.writeln(
+          'WARNING: Could not analyze file: $file. Contexts: $includedPaths.');
     }
   }
 
